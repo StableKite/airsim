@@ -33,7 +33,7 @@ def get_pfm_array(response) -> ndarray:
 def get_public_fields(obj: object) -> str:
     return [
         attr for attr in dir(obj)
-        if not (attr.startswith("_") 
+        if not (attr.startswith('_') 
         or isbuiltin(attr)
         or isfunction(attr)
         or ismethod(attr))

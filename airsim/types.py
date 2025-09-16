@@ -3,8 +3,11 @@ from math import isnan
 from pprint import pformat
 from enum import Enum, IntEnum
 from dataclasses import dataclass, asdict, field, fields, is_dataclass
-from numpy import float32, uint8, uint64, ndarray, nan, sctypes, cross as np_cross, array
+from numpy import cross as np_cross, array, \
+    float32, int8, int16, int32, int64, uint8, uint16, uint32, uint64, float16, float32, float64, ndarray, nan
 from typing import get_type_hints, get_origin, get_args, Self, Iterator, Tuple, List, Dict, TypeAlias, Any, Type
+
+sctypes = [int, float, int8, int16, int32, int64, uint8, uint16, uint32, uint64, float16, float32, float64]
 
 
 class MsgpackMixin:
@@ -150,7 +153,7 @@ class Quaternionr(MsgpackMixin):
     def __truediv__(self, other: Self) -> Self:
         if type(other) == type(self):
             return self * other.inverse()
-        elif type(other) in [int, float] + sctypes["int"] + sctypes["uint"] + sctypes["float"]:
+        elif type(other) in [int, float] + sctypes:
             return Quaternionr( self.x_val / other, self.y_val / other, self.z_val / other, self.w_val / other)
         else:
             raise TypeError(f"Unsupported operand type(s) for /: {type(self)} and {type(other)}")
@@ -224,13 +227,13 @@ class Vector3r(MsgpackMixin):
         return Vector3r(self.x_val - other.x_val, self.y_val - other.y_val, self.z_val - other.z_val)
 
     def __truediv__(self, other: Self) -> Self:
-        if type(other) in [int, float] + sctypes["int"] + sctypes["uint"] + sctypes["float"]:
+        if type(other) in [int, float] + sctypes:
             return Vector3r( self.x_val / other, self.y_val / other, self.z_val / other)
         else:
             raise TypeError(f"Unsupported operand type(s) for /: {type(self)} and {type(other)}")
 
     def __mul__(self, other: Self) -> Self:
-        if type(other) in [int, float] + sctypes["int"] + sctypes["uint"] + sctypes["float"]:
+        if type(other) in [int, float] + sctypes:
             return Vector3r(self.x_val * other, self.y_val * other, self.z_val * other)
         else:
             raise TypeError(f"Unsupported operand type(s) for *: {type(self)} and {type(other)}")

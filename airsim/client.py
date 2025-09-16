@@ -18,7 +18,7 @@ class VehicleClient:
             self,
             ip: str = "127.0.0.1",
             port: int = 41451,
-            timeout_value: Optional[int] = 3600,
+            timeout_value: int = 3600,
             reconnect_limit: int = 5
         ):
         """
@@ -27,7 +27,7 @@ class VehicleClient:
         Args:
             ip (str): Simulator IP address
             port (int): Simulator port
-            timeout_value (Optional[int]): Timeout, in seconds
+            timeout_value (int): Timeout, in seconds
             reconnect_limit (int): Limit of reconnection attempts
         """
 
@@ -469,7 +469,7 @@ class VehicleClient:
             camera_name: str,
             vehicle_name: str = "",
             external: bool = False
-        ) -> str:  
+        ) -> str:
         result = self.client.call("simGetLensSettings", camera_name, vehicle_name, external)
         if (result == "" or result == "\0"):
             return None
@@ -478,11 +478,11 @@ class VehicleClient:
 
     def sim_set_preset_lens_settings(
             self,
-            preset_lens_settings,
+            preset_lens_settings: str,
             camera_name: str,
             vehicle_name: str = "",
             external: bool = False
-        ):  
+        ):
         self.client.call(
             "simSetPresetLensSettings",
             preset_lens_settings,
