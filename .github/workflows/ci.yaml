@@ -560,27 +560,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/src:ro" \
-            -e EXPECTED_ARCH \
-            -e EXPECTED_VERSION \
-            python:3.14-alpine \
-            sh -euxc '
-              apk add --no-cache git
+          alpine_script="$RUNNER_TEMP/airsim-musl.sh"
 
-              python -m pip install --upgrade \
-                pip \
-                build \
-                wheel \
-                "numpy>=2"
+          cat > "$alpine_script" <<'ALPINE'
+          #!/bin/sh
+          set -eux
 
-              test "$(uname -m)" = "$EXPECTED_ARCH"
+          apk add --no-cache git
 
-              mkdir -p /work
-              cp -a /src/. /work/
-              cd /work
+          python -m pip install --upgrade \
+            pip \
+            build \
+            wheel \
+            "numpy>=2"
 
-              cat > MANIFEST.in <<'"'"'EOF'"'"'
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+
+          mkdir -p /work
+          cp -a /src/. /work/
+          cd /work
+
+          git config --global --add safe.directory /work
+          test "$(git rev-parse --verify HEAD)" = "$EXPECTED_GIT_SHA"
+
+          cat > MANIFEST.in <<'EOF'
           include README.md
           include LICENSE
           include VERSION.txt
@@ -589,16 +592,16 @@ jobs:
           recursive-include airsim *.py
           EOF
 
-              python -m compileall -q \
-                airsim \
-                ci_wheel_smoke.py
+          python -m compileall -q \
+            airsim \
+            ci_wheel_smoke.py
 
-              python -m build \
-                --wheel \
-                --sdist \
-                --outdir platform-dist
+          python -m build \
+            --wheel \
+            --sdist \
+            --outdir platform-dist
 
-              python - <<'"'"'PY'"'"'
+          python - <<'PY'
           from pathlib import Path
           import os
           import tarfile
@@ -609,13 +612,16 @@ jobs:
           wheel = dist / f"airsim-{version}-py3-none-any.whl"
           sdist = dist / f"airsim-{version}.tar.gz"
 
-          if list(dist.glob("*.whl")) != [wheel]:
+          wheels = list(dist.glob("*.whl"))
+          sdists = list(dist.glob("*.tar.gz"))
+
+          if wheels != [wheel]:
               raise SystemExit(
-                  f"Unexpected musl wheel set: {list(dist.glob('*.whl'))}"
+                  f"Unexpected musl wheel set: {wheels}"
               )
-          if list(dist.glob("*.tar.gz")) != [sdist]:
+          if sdists != [sdist]:
               raise SystemExit(
-                  f"Unexpected musl sdist set: {list(dist.glob('*.tar.gz'))}"
+                  f"Unexpected musl sdist set: {sdists}"
               )
 
           with zipfile.ZipFile(wheel) as archive:
@@ -634,7 +640,9 @@ jobs:
               ).decode("utf-8")
 
           if "Tag: py3-none-any" not in wheel_metadata:
-              raise SystemExit("Musl-built wheel is not universal")
+              raise SystemExit(
+                  "Musl-built wheel is not universal"
+              )
 
           with tarfile.open(sdist, "r:gz") as archive:
               archive.getmembers()
@@ -642,56 +650,79 @@ jobs:
           print("musl source artifacts OK")
           PY
 
-              rm -rf sdist-check rebuilt-wheel
-              mkdir -p sdist-check rebuilt-wheel
+          rm -rf sdist-check rebuilt-wheel
+          mkdir -p sdist-check rebuilt-wheel
 
-              tar -xzf \
-                "platform-dist/airsim-${EXPECTED_VERSION}.tar.gz" \
-                -C sdist-check
+          tar -xzf \
+            "platform-dist/airsim-${EXPECTED_VERSION}.tar.gz" \
+            -C sdist-check
 
-              root="$(
-                find sdist-check \
-                  -mindepth 1 \
-                  -maxdepth 1 \
-                  -type d \
-                  -print
-              )"
+          root="$(
+            find sdist-check \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              -print
+          )"
 
-              test -n "$root"
-              test "$(find sdist-check -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1
+          test -n "$root"
+          test "$(
+            find sdist-check \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d |
+              wc -l
+          )" -eq 1
 
-              python -m build \
-                --wheel \
-                --outdir rebuilt-wheel \
-                "$root"
+          python -m build \
+            --wheel \
+            --outdir rebuilt-wheel \
+            "$root"
 
-              rebuilt="$(
-                find rebuilt-wheel \
-                  -maxdepth 1 \
-                  -type f \
-                  -name "*.whl" \
-                  -print
-              )"
+          rebuilt="$(
+            find rebuilt-wheel \
+              -maxdepth 1 \
+              -type f \
+              -name "*.whl" \
+              -print
+          )"
 
-              test -n "$rebuilt"
-              test "$(find rebuilt-wheel -maxdepth 1 -type f -name "*.whl" | wc -l)" -eq 1
+          test -n "$rebuilt"
+          test "$(
+            find rebuilt-wheel \
+              -maxdepth 1 \
+              -type f \
+              -name "*.whl" |
+              wc -l
+          )" -eq 1
 
-              test "$(basename "$rebuilt")" = \
-                "airsim-${EXPECTED_VERSION}-py3-none-any.whl"
+          test "$(basename "$rebuilt")" = \
+            "airsim-${EXPECTED_VERSION}-py3-none-any.whl"
 
-              python -m pip install \
-                --force-reinstall \
-                --no-deps \
-                "$rebuilt"
+          python -m pip install \
+            --force-reinstall \
+            --no-deps \
+            "$rebuilt"
 
-              smoke_dir=/tmp/airsim-smoke
-              rm -rf "$smoke_dir"
-              mkdir -p "$smoke_dir"
-              cp ci_wheel_smoke.py "$smoke_dir/"
+          smoke_dir=/tmp/airsim-smoke
+          rm -rf "$smoke_dir"
+          mkdir -p "$smoke_dir"
+          cp ci_wheel_smoke.py "$smoke_dir/"
 
-              cd "$smoke_dir"
-              python ci_wheel_smoke.py "$EXPECTED_VERSION"
-            '
+          cd "$smoke_dir"
+          python ci_wheel_smoke.py "$EXPECTED_VERSION"
+          ALPINE
+
+          chmod +x "$alpine_script"
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -v "$alpine_script:/tmp/airsim-musl.sh:ro" \
+            -e EXPECTED_ARCH \
+            -e EXPECTED_VERSION \
+            -e EXPECTED_GIT_SHA="$GITHUB_SHA" \
+            python:3.14-alpine \
+            sh /tmp/airsim-musl.sh
 
 
   publish:
