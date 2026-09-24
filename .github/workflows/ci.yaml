@@ -12,11 +12,12 @@ permissions:
 env:
   DEVPI_SERVER: https://stablekite.com:4438/
   DEVPI_TARGET_INDEX: https://stablekite.com:4438/StableKite/index/
+  AIRSIM_VERSION: "2.0.2"
 
 jobs:
-  build:
-    name: Build distributions
-    runs-on: ubuntu-24.04
+  windows-package:
+    name: Windows x86_64 / source package
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -29,49 +30,52 @@ jobs:
         with:
           python-version: "3.14t"
 
-      - name: Install build frontend
-        run: python -m pip install --upgrade build
+      - name: Install build and smoke dependencies
+        run: >-
+          python -m pip install --upgrade
+          build
+          wheel
+          "numpy>=2"
 
       - name: Compile Python sources
-        run: python -m compileall -q airsim
+        run: python -m compileall -q airsim ci_wheel_smoke.py
 
       - name: Verify VCS dependency is reachable
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          git ls-remote \
-            https://github.com/StableKite/msgpack-rpc-python.git \
-            HEAD >/dev/null
-          echo "msgpack-rpc-python repository is reachable"
+          git ls-remote `
+            https://github.com/StableKite/msgpack-rpc-python.git `
+            HEAD | Out-Null
 
-      - name: Ensure sdist contains external build inputs
-        shell: bash
+          if ($LASTEXITCODE -ne 0) {
+            throw "msgpack-rpc-python repository is not reachable."
+          }
+
+      - name: Prepare source manifest
+        shell: pwsh
         run: |
-          set -euo pipefail
-
-          touch MANIFEST.in
-
-          for entry in \
-            "include README.md" \
-            "include LICENSE" \
-            "include VERSION.txt" \
-            "include requirements.txt" \
-            "include pyproject.toml" \
+          $Entries = @(
+            "include README.md"
+            "include LICENSE"
+            "include VERSION.txt"
+            "include requirements.txt"
+            "include pyproject.toml"
             "recursive-include airsim *.py"
-          do
-            grep -qxF "$entry" MANIFEST.in || printf '%s\n' "$entry" >> MANIFEST.in
-          done
+          )
 
-          echo "Effective MANIFEST.in:"
-          cat MANIFEST.in
+          [System.IO.File]::WriteAllLines(
+            (Join-Path $PWD "MANIFEST.in"),
+            $Entries,
+            [System.Text.UTF8Encoding]::new($false)
+          )
 
-      - name: Build wheel and source distribution
+      - name: Build wheel and source distribution on Windows
         run: python -m build --wheel --sdist --outdir dist
 
-      - name: Verify distributions
-        shell: bash
+      - name: Verify Windows-built distributions
+        shell: pwsh
         run: |
-          python - <<'PY'
+          @'
           from email.parser import BytesParser
           from email.policy import default
           from pathlib import Path
@@ -80,31 +84,21 @@ jobs:
           import tarfile
           import zipfile
 
-          version = Path("VERSION.txt").read_text(encoding="utf-8").strip()
-          expected_wheel = f"airsim-{version}-py3-none-any.whl"
-          expected_sdist = f"airsim-{version}.tar.gz"
-
+          version = os.environ["AIRSIM_VERSION"]
           dist = Path("dist")
-          wheels = list(dist.glob("*.whl"))
-          sdists = list(dist.glob("*.tar.gz"))
+          wheel = dist / f"airsim-{version}-py3-none-any.whl"
+          sdist = dist / f"airsim-{version}.tar.gz"
 
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected exactly one wheel, got: {wheels}")
-          if len(sdists) != 1:
-              raise SystemExit(f"Expected exactly one sdist, got: {sdists}")
+          actual_wheels = list(dist.glob("*.whl"))
+          actual_sdists = list(dist.glob("*.tar.gz"))
 
-          wheel = wheels[0]
-          sdist = sdists[0]
-
-          if wheel.name != expected_wheel:
+          if actual_wheels != [wheel]:
               raise SystemExit(
-                  f"Unexpected wheel filename: {wheel.name}; "
-                  f"expected {expected_wheel}"
+                  f"Unexpected Windows wheel set: {actual_wheels}"
               )
-          if sdist.name != expected_sdist:
+          if actual_sdists != [sdist]:
               raise SystemExit(
-                  f"Unexpected sdist filename: {sdist.name}; "
-                  f"expected {expected_sdist}"
+                  f"Unexpected Windows sdist set: {actual_sdists}"
               )
 
           required_package_files = {
@@ -124,14 +118,18 @@ jobs:
               names = set(archive.namelist())
               missing = sorted(required_package_files - names)
               if missing:
-                  raise SystemExit(f"Wheel is missing files: {missing}")
+                  raise SystemExit(
+                      f"Wheel is missing files: {missing}"
+                  )
 
               wheel_metadata_name = next(
-                  name for name in names
+                  name
+                  for name in names
                   if name.endswith(".dist-info/WHEEL")
               )
               package_metadata_name = next(
-                  name for name in names
+                  name
+                  for name in names
                   if name.endswith(".dist-info/METADATA")
               )
 
@@ -140,13 +138,17 @@ jobs:
               ).decode("utf-8")
 
               if "Root-Is-Purelib: true" not in wheel_metadata:
-                  raise SystemExit("Wheel is not marked as pure Python")
+                  raise SystemExit(
+                      "Wheel is not marked as pure Python"
+                  )
               if "Tag: py3-none-any" not in wheel_metadata:
                   raise SystemExit(
                       "Wheel does not contain py3-none-any tag"
                   )
 
-              metadata = BytesParser(policy=default).parsebytes(
+              metadata = BytesParser(
+                  policy=default
+              ).parsebytes(
                   archive.read(package_metadata_name)
               )
 
@@ -156,7 +158,7 @@ jobs:
                   )
               if metadata["Version"] != version:
                   raise SystemExit(
-                      f"Unexpected package version: {metadata['Version']!r}"
+                      f"Unexpected version: {metadata['Version']!r}"
                   )
 
               requirements = metadata.get_all("Requires-Dist", [])
@@ -183,34 +185,34 @@ jobs:
               if missing_requirements:
                   raise SystemExit(
                       "Wheel metadata is missing dependencies "
-                      f"{missing_requirements}; got {requirements!r}"
+                      f"{missing_requirements}; got "
+                      f"{requirements!r}"
                   )
 
               version_py = archive.read(
                   "airsim/version.py"
               ).decode("utf-8")
 
-              if f'__version__ = "{version}"' not in version_py:
-                  raise SystemExit(
-                      "Generated airsim/version.py has unexpected version"
-                  )
-
-              match = re.search(
-                  r'__gitsha__ = "([0-9a-f]{7})"',
-                  version_py,
+          if f'__version__ = "{version}"' not in version_py:
+              raise SystemExit(
+                  "Generated airsim/version.py has wrong version"
               )
-              if match is None:
-                  raise SystemExit(
-                      "Generated airsim/version.py does not contain "
-                      "a 7-character git SHA"
-                  )
 
-              github_sha = os.environ.get("GITHUB_SHA", "")
-              if github_sha and match.group(1) != github_sha[:7]:
-                  raise SystemExit(
-                      "Generated git SHA does not match the workflow commit: "
-                      f"{match.group(1)} != {github_sha[:7]}"
-                  )
+          match = re.search(
+              r'__gitsha__ = "([0-9a-f]{7})"',
+              version_py,
+          )
+          if match is None:
+              raise SystemExit(
+                  "Generated version.py lacks a 7-char git SHA"
+              )
+
+          github_sha = os.environ.get("GITHUB_SHA", "")
+          if github_sha and match.group(1) != github_sha[:7]:
+              raise SystemExit(
+                  "Generated git SHA does not match workflow commit: "
+                  f"{match.group(1)} != {github_sha[:7]}"
+              )
 
           with tarfile.open(sdist, "r:gz") as archive:
               names = archive.getnames()
@@ -231,60 +233,116 @@ jobs:
           )
 
           for suffix in required_sdist_suffixes:
-              if not any(name.endswith(suffix) for name in names):
+              if not any(
+                  name.endswith(suffix)
+                  for name in names
+              ):
                   raise SystemExit(
                       f"Source distribution is missing: {suffix}"
                   )
 
-          print("Artifacts:")
-          print(f"  {wheel.name} ({wheel.stat().st_size} bytes)")
-          print(f"  {sdist.name} ({sdist.stat().st_size} bytes)")
-          PY
+          print(f"Windows wheel OK: {wheel.name}")
+          print(f"Windows sdist OK: {sdist.name}")
+          '@ | python -
 
-      - name: Verify sdist can rebuild the wheel
-        shell: bash
+      - name: Rebuild wheel from Windows-built sdist
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $SdistRoot = Join-Path $env:RUNNER_TEMP "airsim-sdist"
+          $Rebuilt = Join-Path $env:RUNNER_TEMP "airsim-rebuilt"
 
-          VERSION="$(tr -d '\r\n' < VERSION.txt)"
+          Remove-Item `
+            -LiteralPath $SdistRoot `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
 
-          rm -rf sdist-check rebuilt-wheel
-          mkdir -p sdist-check rebuilt-wheel
+          Remove-Item `
+            -LiteralPath $Rebuilt `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
 
-          tar -xzf "dist/airsim-${VERSION}.tar.gz" -C sdist-check
+          New-Item -ItemType Directory -Path $SdistRoot | Out-Null
+          New-Item -ItemType Directory -Path $Rebuilt | Out-Null
 
-          mapfile -t roots < <(
-            find sdist-check -mindepth 1 -maxdepth 1 -type d -print
+          tar -xzf "dist/airsim-$env:AIRSIM_VERSION.tar.gz" `
+            -C $SdistRoot
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to extract Windows-built sdist."
+          }
+
+          $Roots = @(
+            Get-ChildItem -LiteralPath $SdistRoot -Directory
           )
 
-          if [ "${#roots[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one sdist root directory."
-            exit 1
-          fi
+          if ($Roots.Count -ne 1) {
+            throw "Expected exactly one sdist root."
+          }
 
-          python -m build \
-            --wheel \
-            --outdir rebuilt-wheel \
-            "${roots[0]}"
+          python -m build `
+            --wheel `
+            --outdir $Rebuilt `
+            $Roots[0].FullName
 
-          mapfile -t rebuilt < <(
-            find rebuilt-wheel -maxdepth 1 -type f -name '*.whl' -print
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to rebuild wheel from sdist."
+          }
+
+          $Wheels = @(
+            Get-ChildItem -LiteralPath $Rebuilt -Filter "*.whl"
           )
 
-          if [ "${#rebuilt[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one wheel rebuilt from sdist."
-            exit 1
-          fi
+          if (
+            $Wheels.Count -ne 1 -or
+            $Wheels[0].Name -ne
+              "airsim-$env:AIRSIM_VERSION-py3-none-any.whl"
+          ) {
+            throw "Unexpected wheel rebuilt from Windows sdist."
+          }
 
-          EXPECTED="airsim-${VERSION}-py3-none-any.whl"
-          if [ "$(basename "${rebuilt[0]}")" != "$EXPECTED" ]; then
-            echo "::error::Unexpected rebuilt wheel: ${rebuilt[0]}"
-            exit 1
-          fi
+          python -m pip install `
+            --force-reinstall `
+            --no-deps `
+            $Wheels[0].FullName
 
-          echo "Successfully rebuilt from sdist: ${rebuilt[0]}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install rebuilt Windows wheel."
+          }
 
-      - name: Upload distributions
+      - name: Smoke-test installed Windows wheel
+        shell: pwsh
+        run: |
+          $SmokeDir = Join-Path $env:RUNNER_TEMP "airsim-smoke"
+
+          Remove-Item `
+            -LiteralPath $SmokeDir `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Path $SmokeDir | Out-Null
+
+          Copy-Item `
+            -LiteralPath "ci_wheel_smoke.py" `
+            -Destination (Join-Path $SmokeDir "ci_wheel_smoke.py")
+
+          Push-Location $SmokeDir
+          try {
+            python ci_wheel_smoke.py `
+              "$env:AIRSIM_VERSION" `
+              --require-free-threaded
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows installed-wheel smoke failed."
+            }
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Upload Windows-built distributions
         uses: actions/upload-artifact@v7
         with:
           name: distributions
@@ -294,209 +352,360 @@ jobs:
           if-no-files-found: error
 
 
-  test:
-    name: Test / ${{ matrix.target }}
-    needs: build
+  linux-glibc:
+    name: Linux glibc ${{ matrix.arch }} / source build
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: Linux x86_64
+          - arch: x86_64
             runner: ubuntu-24.04
-
-          - target: Linux aarch64
+          - arch: aarch64
             runner: ubuntu-24.04-arm
-
-          - target: Windows x86_64
-            runner: windows-latest
 
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v8
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
-          name: distributions
-          path: dist
+          persist-credentials: false
 
       - name: Set up Python 3.14t
         uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
 
-      - name: Install test dependency
-        run: python -m pip install --upgrade "numpy>=2"
+      - name: Verify native architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.arch }}"
 
-      - name: Install built wheel
+      - name: Install build and smoke dependencies
+        run: >-
+          python -m pip install --upgrade
+          build
+          wheel
+          "numpy>=2"
+
+      - name: Prepare source manifest
+        shell: bash
+        run: |
+          cat > MANIFEST.in <<'EOF'
+          include README.md
+          include LICENSE
+          include VERSION.txt
+          include requirements.txt
+          include pyproject.toml
+          recursive-include airsim *.py
+          EOF
+
+      - name: Build wheel and source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q airsim ci_wheel_smoke.py
+          python -m build \
+            --wheel \
+            --sdist \
+            --outdir platform-dist
+
+      - name: Verify and rebuild glibc distributions
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t wheels < <(
-            find dist -maxdepth 1 -type f -name '*.whl' -print
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import tarfile
+          import zipfile
+
+          version = os.environ["AIRSIM_VERSION"]
+          dist = Path("platform-dist")
+          expected_wheel = (
+              dist / f"airsim-{version}-py3-none-any.whl"
+          )
+          expected_sdist = (
+              dist / f"airsim-{version}.tar.gz"
           )
 
-          if [ "${#wheels[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one wheel, found ${#wheels[@]}."
+          if list(dist.glob("*.whl")) != [expected_wheel]:
+              raise SystemExit(
+                  f"Unexpected wheel set: {list(dist.glob('*.whl'))}"
+              )
+          if list(dist.glob("*.tar.gz")) != [expected_sdist]:
+              raise SystemExit(
+                  "Unexpected sdist set: "
+                  f"{list(dist.glob('*.tar.gz'))}"
+              )
+
+          with zipfile.ZipFile(expected_wheel) as archive:
+              bad = archive.testzip()
+              if bad is not None:
+                  raise SystemExit(
+                      f"Corrupt wheel member: {bad}"
+                  )
+              wheel_metadata_name = next(
+                  name
+                  for name in archive.namelist()
+                  if name.endswith(".dist-info/WHEEL")
+              )
+              wheel_metadata = archive.read(
+                  wheel_metadata_name
+              ).decode("utf-8")
+
+          if "Tag: py3-none-any" not in wheel_metadata:
+              raise SystemExit("Wheel is not universal")
+
+          with tarfile.open(expected_sdist, "r:gz") as archive:
+              archive.getmembers()
+
+          print("glibc source artifacts OK")
+          PY
+
+          rm -rf sdist-check rebuilt-wheel
+          mkdir -p sdist-check rebuilt-wheel
+
+          tar -xzf \
+            "platform-dist/airsim-${AIRSIM_VERSION}.tar.gz" \
+            -C sdist-check
+
+          mapfile -t roots < <(
+            find sdist-check \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              -print
+          )
+
+          if [ "${#roots[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one sdist root."
             exit 1
           fi
 
-          # OpenCV and msgpack-rpc are intentionally not installed here.
-          # The smoke test stubs only those external modules so we can test
-          # AirSim's own package on CPython 3.14t without requiring a simulator,
-          # camera stack, or a second VCS package build.
+          python -m build \
+            --wheel \
+            --outdir rebuilt-wheel \
+            "${roots[0]}"
+
+          mapfile -t rebuilt < <(
+            find rebuilt-wheel \
+              -maxdepth 1 \
+              -type f \
+              -name '*.whl' \
+              -print
+          )
+
+          if [ "${#rebuilt[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one rebuilt wheel."
+            exit 1
+          fi
+
+          if [ "$(basename "${rebuilt[0]}")" != "airsim-${AIRSIM_VERSION}-py3-none-any.whl" ]; then
+            echo "::error::Unexpected rebuilt wheel: ${rebuilt[0]}"
+            exit 1
+          fi
+
           python -m pip install \
             --force-reinstall \
             --no-deps \
-            "${wheels[0]}"
+            "${rebuilt[0]}"
 
-      - name: Smoke-test package
+      - name: Smoke-test installed glibc wheel
         shell: bash
         run: |
-          python - <<'PY'
-          import math
-          import sys
-          import sysconfig
-          import tempfile
-          import types
+          set -euo pipefail
+
+          smoke_dir="$RUNNER_TEMP/airsim-smoke"
+          rm -rf "$smoke_dir"
+          mkdir -p "$smoke_dir"
+          cp ci_wheel_smoke.py "$smoke_dir/"
+
+          (
+            cd "$smoke_dir"
+            python ci_wheel_smoke.py \
+              "$AIRSIM_VERSION" \
+              --require-free-threaded
+          )
+
+
+  linux-musl:
+    name: Linux musl ${{ matrix.arch }} / source build
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build, rebuild, install and test in native Alpine
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_VERSION: ${{ env.AIRSIM_VERSION }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -e EXPECTED_ARCH \
+            -e EXPECTED_VERSION \
+            python:3.14-alpine \
+            sh -euxc '
+              apk add --no-cache git
+
+              python -m pip install --upgrade \
+                pip \
+                build \
+                wheel \
+                "numpy>=2"
+
+              test "$(uname -m)" = "$EXPECTED_ARCH"
+
+              mkdir -p /work
+              cp -a /src/. /work/
+              cd /work
+
+              cat > MANIFEST.in <<'"'"'EOF'"'"'
+          include README.md
+          include LICENSE
+          include VERSION.txt
+          include requirements.txt
+          include pyproject.toml
+          recursive-include airsim *.py
+          EOF
+
+              python -m compileall -q \
+                airsim \
+                ci_wheel_smoke.py
+
+              python -m build \
+                --wheel \
+                --sdist \
+                --outdir platform-dist
+
+              python - <<'"'"'PY'"'"'
           from pathlib import Path
+          import os
+          import tarfile
+          import zipfile
 
-          import numpy as np
+          version = os.environ["EXPECTED_VERSION"]
+          dist = Path("platform-dist")
+          wheel = dist / f"airsim-{version}-py3-none-any.whl"
+          sdist = dist / f"airsim-{version}.tar.gz"
 
-          assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+          if list(dist.glob("*.whl")) != [wheel]:
+              raise SystemExit(
+                  f"Unexpected musl wheel set: {list(dist.glob('*.whl'))}"
+              )
+          if list(dist.glob("*.tar.gz")) != [sdist]:
+              raise SystemExit(
+                  f"Unexpected musl sdist set: {list(dist.glob('*.tar.gz'))}"
+              )
 
-          # Minimal cv2 stub for importing airsim.utils. The CI does not test
-          # OpenCV itself; it tests the AirSim Python package.
-          cv2 = types.ModuleType("cv2")
-          cv2.imwrite = lambda filename, image: True
-
-          cv2_typing = types.ModuleType("cv2.typing")
-          cv2_typing.MatLike = object
-          cv2.typing = cv2_typing
-
-          sys.modules["cv2"] = cv2
-          sys.modules["cv2.typing"] = cv2_typing
-
-          # Minimal msgpackrpc stub for importing airsim.client without opening
-          # sockets or requiring the external msgpack-rpc implementation.
-          msgpackrpc = types.ModuleType("msgpackrpc")
-          msgpackrpc_future = types.ModuleType("msgpackrpc.future")
-
-          class Future:
-              pass
-
-          class Address:
-              def __init__(self, host, port):
-                  self.host = host
-                  self.port = port
-
-          class Client:
-              def __init__(self, address, **kwargs):
-                  self.address = address
-                  self.kwargs = kwargs
-
-              def call(self, *args, **kwargs):
-                  raise AssertionError(
-                      "Smoke test must not make an RPC call"
+          with zipfile.ZipFile(wheel) as archive:
+              bad = archive.testzip()
+              if bad is not None:
+                  raise SystemExit(
+                      f"Corrupt wheel member: {bad}"
                   )
+              wheel_metadata_name = next(
+                  name
+                  for name in archive.namelist()
+                  if name.endswith(".dist-info/WHEEL")
+              )
+              wheel_metadata = archive.read(
+                  wheel_metadata_name
+              ).decode("utf-8")
 
-          msgpackrpc.Address = Address
-          msgpackrpc.Client = Client
-          msgpackrpc_future.Future = Future
+          if "Tag: py3-none-any" not in wheel_metadata:
+              raise SystemExit("Musl-built wheel is not universal")
 
-          sys.modules["msgpackrpc"] = msgpackrpc
-          sys.modules["msgpackrpc.future"] = msgpackrpc_future
+          with tarfile.open(sdist, "r:gz") as archive:
+              archive.getmembers()
 
-          import airsim
-          from airsim.client import VehicleClient
-          from airsim.pfm import read_pfm, write_pfm
-          from airsim.types import Quaternionr, Vector3r
-          from airsim.utils import to_eularian_angles, to_quaternion
-          from airsim.version import __version__, __gitsha__
-
-          assert __version__
-          assert len(__gitsha__) == 7
-
-          vector = Vector3r(1.0, 2.0, 3.0)
-          assert tuple(vector) == (1.0, 2.0, 3.0)
-          assert vector.to_msgpack() == {
-              "x_val": 1.0,
-              "y_val": 2.0,
-              "z_val": 3.0,
-          }
-
-          restored = Vector3r.from_msgpack(
-              {"x_val": 4.0, "y_val": 5.0, "z_val": 6.0}
-          )
-          assert tuple(restored) == (4.0, 5.0, 6.0)
-
-          quaternion = Quaternionr(
-              x_val=0.0,
-              y_val=0.0,
-              z_val=0.0,
-              w_val=1.0,
-          )
-          assert math.isclose(quaternion.get_length(), 1.0)
-
-          q = to_quaternion(0.0, 0.0, 0.0)
-          roll, pitch, yaw = to_eularian_angles(q)
-          assert math.isclose(q.w_val, 1.0)
-          assert math.isclose(roll, 0.0, abs_tol=1e-12)
-          assert math.isclose(pitch, 0.0, abs_tol=1e-12)
-          assert math.isclose(yaw, 0.0, abs_tol=1e-12)
-
-          client = VehicleClient(
-              ip="192.0.2.1",
-              port=41451,
-              timeout_value=17,
-              reconnect_limit=3,
-          )
-          assert isinstance(client.client, Client)
-          assert client.client.address.host == "192.0.2.1"
-          assert client.client.address.port == 41451
-          assert client.client.kwargs["timeout"] == 17
-          assert client.client.kwargs["reconnect_limit"] == 3
-          assert client.get_client_version() == 1
-          assert client.get_min_required_server_version() == 1
-
-          # The current AirSim write_pfm() implementation only marks the
-          # payload as little-endian when dtype.byteorder is "<" or "|".
-          # NumPy normalizes native little-endian float32 to byteorder "=",
-          # which would make write_pfm() emit a positive scale while writing
-          # little-endian data. That is a project bug unrelated to packaging.
-          # Use explicit big-endian float32 here so the CI smoke test validates
-          # PFM I/O without depending on that known endian-marker issue.
-          image = np.array(
-              [[1.0, 2.0], [3.0, 4.0]],
-              dtype=">f4",
-          )
-
-          with tempfile.TemporaryDirectory() as tmp:
-              filename = Path(tmp) / "test.pfm"
-              write_pfm(str(filename), image)
-              restored_image, scale = read_pfm(str(filename))
-
-          assert scale == 1.0
-          assert np.array_equal(restored_image, image)
-
-          print("AirSim wheel smoke-test OK")
-          print("Installed from:", airsim.__file__)
-          print("Version:", __version__)
-          print("Git SHA:", __gitsha__)
+          print("musl source artifacts OK")
           PY
+
+              rm -rf sdist-check rebuilt-wheel
+              mkdir -p sdist-check rebuilt-wheel
+
+              tar -xzf \
+                "platform-dist/airsim-${EXPECTED_VERSION}.tar.gz" \
+                -C sdist-check
+
+              root="$(
+                find sdist-check \
+                  -mindepth 1 \
+                  -maxdepth 1 \
+                  -type d \
+                  -print
+              )"
+
+              test -n "$root"
+              test "$(find sdist-check -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1
+
+              python -m build \
+                --wheel \
+                --outdir rebuilt-wheel \
+                "$root"
+
+              rebuilt="$(
+                find rebuilt-wheel \
+                  -maxdepth 1 \
+                  -type f \
+                  -name "*.whl" \
+                  -print
+              )"
+
+              test -n "$rebuilt"
+              test "$(find rebuilt-wheel -maxdepth 1 -type f -name "*.whl" | wc -l)" -eq 1
+
+              test "$(basename "$rebuilt")" = \
+                "airsim-${EXPECTED_VERSION}-py3-none-any.whl"
+
+              python -m pip install \
+                --force-reinstall \
+                --no-deps \
+                "$rebuilt"
+
+              smoke_dir=/tmp/airsim-smoke
+              rm -rf "$smoke_dir"
+              mkdir -p "$smoke_dir"
+              cp ci_wheel_smoke.py "$smoke_dir/"
+
+              cd "$smoke_dir"
+              python ci_wheel_smoke.py "$EXPECTED_VERSION"
+            '
 
 
   publish:
-    name: Publish to devpi
+    name: Publish platform-validated artifacts to devpi
+
     needs:
-      - build
-      - test
+      - windows-package
+      - linux-glibc
+      - linux-musl
 
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download distributions
+      - name: Download Windows-built distributions
         uses: actions/download-artifact@v8
         with:
           name: distributions
@@ -507,36 +716,30 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Verify downloaded artifacts
+      - name: Verify publish artifacts
         shell: bash
         run: |
           python - <<'PY'
           from email.parser import BytesParser
           from email.policy import default
           from pathlib import Path
+          import os
           import tarfile
           import zipfile
 
+          version = os.environ["AIRSIM_VERSION"]
           dist = Path("dist")
-          wheels = list(dist.glob("*.whl"))
-          sdists = list(dist.glob("*.tar.gz"))
+          wheel = dist / f"airsim-{version}-py3-none-any.whl"
+          sdist = dist / f"airsim-{version}.tar.gz"
 
-          if len(wheels) != 1:
+          if list(dist.glob("*.whl")) != [wheel]:
               raise SystemExit(
-                  f"Expected exactly one wheel, got: {wheels}"
+                  f"Unexpected publish wheel set: {list(dist.glob('*.whl'))}"
               )
-          if len(sdists) != 1:
+          if list(dist.glob("*.tar.gz")) != [sdist]:
               raise SystemExit(
-                  f"Expected exactly one sdist, got: {sdists}"
+                  f"Unexpected publish sdist set: {list(dist.glob('*.tar.gz'))}"
               )
-
-          wheel = wheels[0]
-          sdist = sdists[0]
-
-          if not wheel.name.startswith("airsim-"):
-              raise SystemExit(f"Unexpected wheel filename: {wheel.name}")
-          if not wheel.name.endswith("-py3-none-any.whl"):
-              raise SystemExit(f"Unexpected wheel tag: {wheel.name}")
 
           with zipfile.ZipFile(wheel) as archive:
               bad = archive.testzip()
@@ -545,25 +748,37 @@ jobs:
                       f"Corrupt wheel member: {bad}"
                   )
 
+              wheel_metadata_name = next(
+                  name
+                  for name in archive.namelist()
+                  if name.endswith(".dist-info/WHEEL")
+              )
               metadata_name = next(
-                  name for name in archive.namelist()
+                  name
+                  for name in archive.namelist()
                   if name.endswith(".dist-info/METADATA")
               )
-              metadata = BytesParser(policy=default).parsebytes(
+
+              wheel_metadata = archive.read(
+                  wheel_metadata_name
+              ).decode("utf-8")
+              metadata = BytesParser(
+                  policy=default
+              ).parsebytes(
                   archive.read(metadata_name)
               )
 
-          version = metadata["Version"]
+          if "Root-Is-Purelib: true" not in wheel_metadata:
+              raise SystemExit("Publish wheel is not pure Python")
+          if "Tag: py3-none-any" not in wheel_metadata:
+              raise SystemExit("Publish wheel is not universal")
           if metadata["Name"].lower() != "airsim":
               raise SystemExit(
                   f"Unexpected package name: {metadata['Name']!r}"
               )
-
-          expected_sdist = f"airsim-{version}.tar.gz"
-          if sdist.name != expected_sdist:
+          if metadata["Version"] != version:
               raise SystemExit(
-                  f"Unexpected sdist filename: {sdist.name}; "
-                  f"expected {expected_sdist}"
+                  f"Unexpected version: {metadata['Version']!r}"
               )
 
           with tarfile.open(sdist, "r:gz") as archive:
@@ -574,29 +789,38 @@ jobs:
           print(f"  {sdist.name} ({sdist.stat().st_size} bytes)")
           PY
 
-      - name: Install devpi tools
+      - name: Install publish tools
         run: >-
           python -m pip install
+          twine
           devpi-client
           devpi-tokens
-          "pypitoken>=6.0.1"
+
+      - name: Twine check
+        run: python -m twine check dist/*
 
       - name: Publish
         env:
           DEVPI_TOKEN: ${{ secrets.DEVPI_TOKEN }}
+          DEVPI_CLIENTDIR: ${{ runner.temp }}/devpi-client
         shell: bash
         run: |
           set -euo pipefail
 
           if [ -z "${DEVPI_TOKEN:-}" ]; then
-            echo "::error::DEVPI_TOKEN is not available to this repository."
+            echo "::error::DEVPI_TOKEN is not available."
             exit 1
           fi
 
           TOKEN_FILE="$RUNNER_TEMP/devpi-token"
           printf '%s' "$DEVPI_TOKEN" > "$TOKEN_FILE"
           chmod 600 "$TOKEN_FILE"
-          trap 'rm -f "$TOKEN_FILE"' EXIT
+
+          cleanup() {
+            rm -f "$TOKEN_FILE"
+            rm -rf "$DEVPI_CLIENTDIR"
+          }
+          trap cleanup EXIT
 
           devpi use "$DEVPI_SERVER"
           devpi token-login -f "$TOKEN_FILE"
